@@ -1,0 +1,775 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Обходчик нефтебазы — тренажёр по технике безопасности</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:100%; height:100%; overflow:hidden; background:#10141a; font-family:'Segoe UI',Arial,sans-serif; }
+  #scene { position:absolute; inset:0; display:block; }
+
+  /* ---------- HUD ---------- */
+  .hud { position:absolute; z-index:5; color:#e8edf2; user-select:none; pointer-events:none; }
+  #topbar {
+    top:0; left:0; right:0; display:flex; gap:18px; align-items:center;
+    padding:10px 16px; background:linear-gradient(180deg,rgba(8,12,18,.85),rgba(8,12,18,0));
+    font-size:15px;
+  }
+  #topbar b { color:#ffd23f; }
+  .gas-ok  { color:#7ddf7d; } .gas-warn{ color:#ffd23f; } .gas-bad { color:#ff5e5e; font-weight:bold; }
+  #panel {
+    top:56px; right:12px; width:250px; background:rgba(10,15,22,.78);
+    border:1px solid #2c3a4a; border-radius:10px; padding:12px; font-size:13px;
+  }
+  #panel h3 { font-size:13px; color:#ffd23f; margin-bottom:6px; letter-spacing:.5px; }
+  #checklist li { list-style:none; padding:2px 0; color:#9fb0c0; }
+  #checklist li.done { color:#7ddf7d; }
+  #checklist li.done::before { content:"✔ "; }
+  #checklist li:not(.done)::before { content:"○ "; }
+  #log { margin-top:8px; max-height:150px; overflow:hidden; font-size:11.5px; color:#8b9bab; }
+  #log li { list-style:none; padding:1px 0; border-bottom:1px dotted #243140; }
+  #log li.bad { color:#ff8585; }
+  #log li.good { color:#8fe28f; }
+  #hint {
+    bottom:34px; left:50%; transform:translateX(-50%);
+    background:rgba(10,15,22,.8); border:1px solid #2c3a4a; border-radius:8px;
+    padding:8px 18px; font-size:15px; white-space:nowrap;
+  }
+  #hint b { color:#ffd23f; }
+  #crosshair {
+    top:50%; left:50%; width:6px; height:6px; margin:-3px 0 0 -3px;
+    background:#fff; border-radius:50%; opacity:.8; box-shadow:0 0 4px #000;
+  }
+  #toasts { top:70px; left:50%; transform:translateX(-50%); display:flex; flex-direction:column; gap:6px; align-items:center; }
+  .toast {
+    background:rgba(20,28,38,.92); border:1px solid #3a4a5c; color:#e8edf2;
+    border-radius:8px; padding:8px 20px; font-size:15px; animation:fade 4s forwards;
+  }
+  .toast.bad { border-color:#a33; background:rgba(60,16,16,.94); color:#ffb0b0; }
+  .toast.good { border-color:#3a3; background:rgba(14,46,20,.94); color:#b7f5b7; }
+  @keyframes fade { 0%{opacity:0;transform:translateY(-8px)} 8%{opacity:1;transform:none} 80%{opacity:1} 100%{opacity:0} }
+
+  /* ---------- модальные окна ---------- */
+  .overlay {
+    position:absolute; inset:0; z-index:10; display:flex; align-items:center; justify-content:center;
+    background:rgba(5,8,12,.72); color:#e8edf2;
+  }
+  .overlay.hidden { display:none; }
+  .card {
+    width:min(680px,92vw); max-height:88vh; overflow:auto; background:#141b24;
+    border:1px solid #31425a; border-radius:14px; padding:28px 32px;
+  }
+  .card h1 { color:#ffd23f; font-size:24px; margin-bottom:10px; }
+  .card h2 { color:#ffd23f; font-size:19px; margin-bottom:10px; }
+  .card p  { font-size:15px; line-height:1.55; margin-bottom:10px; color:#cdd8e2; }
+  .card ul { margin:0 0 12px 22px; font-size:14.5px; line-height:1.6; color:#b9c6d2; }
+  .card .keys { color:#8fb6e8; }
+  .opt {
+    display:block; width:100%; text-align:left; margin:8px 0; padding:11px 14px;
+    background:#1d2836; color:#dde6ee; border:1px solid #36465c; border-radius:9px;
+    font-size:14.5px; cursor:pointer; font-family:inherit; line-height:1.4;
+  }
+  .opt:hover { background:#27384e; border-color:#4d6480; }
+  .btn {
+    display:inline-block; margin-top:14px; padding:11px 26px; font-size:16px; font-weight:600;
+    background:#ffd23f; color:#1a1408; border:none; border-radius:9px; cursor:pointer; font-family:inherit;
+  }
+  .btn:hover { background:#ffdf70; }
+  #m-result { margin-top:12px; padding:12px 14px; border-radius:9px; font-size:14.5px; line-height:1.5; }
+  #m-result.ok  { background:rgba(20,70,30,.5); border:1px solid #2e7d3e; color:#b7f5b7; }
+  #m-result.bad { background:rgba(80,20,20,.5); border:1px solid #8d3434; color:#ffb9b9; }
+  .stat { font-size:16px; margin:4px 0; }
+  .stat b { color:#ffd23f; }
+  .rank { margin-top:14px; font-size:19px; font-weight:700; }
+  .rank.good { color:#7ddf7d; } .rank.mid { color:#ffd23f; } .rank.bad { color:#ff6868; }
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+
+<div id="topbar" class="hud">
+  <span>⏱ Смена: <b id="time">06:00</b></span>
+  <span>★ Очки: <b id="score">0</b></span>
+  <span>⚠ Нарушения: <b id="viol">0 / 3</b></span>
+  <span>🦺 СИЗ: <b id="ppe">не получены</b></span>
+  <span>☣ Газоанализатор: <b id="gas">—</b></span>
+</div>
+
+<div id="panel" class="hud">
+  <h3>МАРШРУТ ОБХОДА</h3>
+  <ul id="checklist"></ul>
+  <h3 style="margin-top:10px">ЖУРНАЛ</h3>
+  <ul id="log"></ul>
+</div>
+
+<div id="hint" class="hud"></div>
+<div id="crosshair" class="hud"></div>
+<div id="toasts" class="hud"></div>
+
+<!-- стартовый инструктаж -->
+<div id="start" class="overlay">
+  <div class="card">
+    <h1>ОБХОДЧИК НЕФТЕБАЗЫ «СЕВЕРНАЯ»</h1>
+    <p>Вы — обходчик товарного парка. Ваша задача — совершить обход территории,
+       осмотреть <b style="color:#ffd23f">6 контрольных точек</b> и сдать смену на КПП,
+       строго соблюдая требования промышленной безопасности.</p>
+    <h2>Инструктаж по технике безопасности</h2>
+    <ul>
+      <li>Перед выходом на территорию <b>получите СИЗ в бытовке</b> — без каски и газоанализатора охрана не пропустит.</li>
+      <li><b>Бег по территории объекта запрещён</b> (за территорией — можно).</li>
+      <li>О любых неисправностях и утечках <b>немедленно докладывайте диспетчеру</b>, не устраняйте их самостоятельно.</li>
+      <li>При срабатывании газоанализатора — <b>покиньте загазованную зону</b> и доложите по рации.</li>
+      <li><b>Три нарушения — отстранение от работы.</b></li>
+    </ul>
+    <h2>Управление</h2>
+    <ul class="keys">
+      <li><b>W A S D</b> / стрелки — движение, <b>мышь</b> — осмотреться</li>
+      <li><b>E</b> — осмотреть / взаимодействовать &nbsp;·&nbsp; <b>R</b> — доклад по рации</li>
+      <li><b>Shift</b> — бег (помните о правилах!) &nbsp;·&nbsp; <b>Esc</b> — пауза</li>
+    </ul>
+    <button class="btn" id="btn-start">Приступить к смене</button>
+  </div>
+</div>
+
+<!-- ситуация на точке -->
+<div id="modal" class="overlay hidden">
+  <div class="card">
+    <h2 id="m-title"></h2>
+    <p id="m-text"></p>
+    <div id="m-opts"></div>
+    <div id="m-result" class="hidden"></div>
+    <button class="btn hidden" id="m-next">Продолжить обход</button>
+  </div>
+</div>
+
+<!-- пауза -->
+<div id="pause" class="overlay hidden">
+  <div class="card" style="text-align:center">
+    <h2>Пауза</h2>
+    <p>Кликните, чтобы продолжить смену.</p>
+  </div>
+</div>
+
+<!-- конец смены -->
+<div id="end" class="overlay hidden">
+  <div class="card">
+    <h1 id="e-title"></h1>
+    <p id="e-text"></p>
+    <div class="stat">Осмотрено точек: <b id="e-points"></b></div>
+    <div class="stat">Нарушения ТБ: <b id="e-viol"></b></div>
+    <div class="stat">Итоговый счёт: <b id="e-score"></b></div>
+    <div class="rank" id="e-rank"></div>
+    <button class="btn" onclick="location.reload()">Начать новую смену</button>
+  </div>
+</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ================= утилиты ================= */
+const $ = id => document.getElementById(id);
+const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+const rand = (a,b) => a + Math.random()*(a-a+b-a);
+const fmt = s => { s=Math.max(0,Math.ceil(s)); return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0'); };
+
+let AC = null;
+function beep(f=880, d=0.07, v=0.12){
+  try{
+    AC = AC || new (window.AudioContext||window.webkitAudioContext)();
+    const o = AC.createOscillator(), g = AC.createGain();
+    o.type='square'; o.frequency.value=f; g.gain.value=v;
+    o.connect(g); g.connect(AC.destination);
+    o.start(); o.stop(AC.currentTime+d);
+  }catch(e){}
+}
+
+function toast(text, kind=''){
+  const d = document.createElement('div');
+  d.className = 'toast '+kind; d.textContent = text;
+  $('toasts').appendChild(d);
+  setTimeout(()=>d.remove(), 4100);
+}
+function logLine(text, kind=''){
+  const li = document.createElement('li');
+  li.className = kind;
+  li.textContent = `[${fmt(SHIFT - S.timeLeft)}] ${text}`;
+  $('log').prepend(li);
+  while($('log').children.length > 9) $('log').lastChild.remove();
+}
+
+/* ================= состояние ================= */
+const SHIFT = 360; // секунд на смену
+const S = {
+  started:false, over:false,
+  timeLeft: SHIFT,
+  score:0, violations:0,
+  ppe:false,
+  runT:0, runWarned:false, gateMsgT:0,
+  expoT:0, beepT:0,
+  leak:null, leakSchedule:[35+Math.random()*20, 150+Math.random()*40], leakIdx:0,
+  allDone:false,
+};
+
+function addScore(n, why, kind='good'){ S.score+=n; updateHUD(); if(why) logLine(`${why} (+${n})`, kind); }
+function violation(why){
+  S.violations++;
+  beep(220,.3,.18);
+  toast('НАРУШЕНИЕ: '+why, 'bad');
+  logLine('Нарушение: '+why, 'bad');
+  updateHUD();
+  if(S.violations>=3) endGame('fired');
+}
+
+/* ================= сцена ================= */
+const canvas = $('scene');
+const renderer = new THREE.WebGLRenderer({canvas, antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x9fc4e0);
+scene.fog = new THREE.Fog(0x9fc4e0, 90, 240);
+
+const camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, .1, 500);
+camera.rotation.order = 'YXZ';
+
+scene.add(new THREE.HemisphereLight(0xcfe5f5, 0x4a5240, .85));
+const sun = new THREE.DirectionalLight(0xfff2dd, 1.6);
+sun.position.set(60, 90, 40);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048,2048);
+Object.assign(sun.shadow.camera, {left:-100, right:100, top:100, bottom:-100, far:250});
+scene.add(sun);
+
+addEventListener('resize', ()=>{
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ---------- помощники геометрии ---------- */
+const colliders = []; // {type:'r',minX,maxX,minZ,maxZ} | {type:'c',x,z,r} | gate:true
+const PR = 0.55;      // радиус игрока
+
+function mat(color, rough=.85){ return new THREE.MeshStandardMaterial({color, roughness:rough}); }
+function box(w,h,d, color, x,y,z, collide=true){
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w,h,d), mat(color));
+  m.position.set(x,y,z); m.castShadow = m.receiveShadow = true;
+  scene.add(m);
+  if(collide) colliders.push({type:'r', minX:x-w/2, maxX:x+w/2, minZ:z-d/2, maxZ:z+d/2});
+  return m;
+}
+function pipe(x1,z1, x2,z2, y=0.8, r=0.35){
+  const dx=x2-x1, dz=z2-z1, len=Math.hypot(dx,dz);
+  const m = new THREE.Mesh(new THREE.CylinderGeometry(r,r,len,12), mat(0x8a8f96,.5));
+  m.position.set((x1+x2)/2, y, (z1+z2)/2);
+  m.rotation.z = Math.PI/2;
+  m.rotation.y = -Math.atan2(dz,dx);
+  m.castShadow = true; scene.add(m);
+}
+function textSprite(text, {size=30, color='#fff', bg='rgba(8,12,18,.6)', scale=1}={}){
+  const pad=14, c=document.createElement('canvas');
+  let g=c.getContext('2d'); g.font=`bold ${size}px Arial`;
+  c.width = Math.ceil(g.measureText(text).width)+pad*2; c.height = size+pad*1.6;
+  g=c.getContext('2d'); g.font=`bold ${size}px Arial`;
+  if(bg){ g.fillStyle=bg; g.fillRect(0,0,c.width,c.height); }
+  g.fillStyle=color; g.textAlign='center'; g.textBaseline='middle';
+  g.fillText(text, c.width/2, c.height/2);
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(c), transparent:true, depthWrite:false}));
+  sp.scale.set(c.width/38*scale, c.height/38*scale, 1);
+  return sp;
+}
+function label(text, x,y,z, scale=1){ const s=textSprite(text,{scale}); s.position.set(x,y,z); scene.add(s); return s; }
+function marker(symbol, color){
+  const c=document.createElement('canvas'); c.width=c.height=96;
+  const g=c.getContext('2d');
+  g.fillStyle=color; g.beginPath(); g.arc(48,48,42,0,7); g.fill();
+  g.fillStyle='#10141a'; g.font='bold 56px Arial'; g.textAlign='center'; g.textBaseline='middle';
+  g.fillText(symbol,48,52);
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(c), transparent:true, depthWrite:false}));
+  sp.scale.set(1.6,1.6,1);
+  return sp;
+}
+
+/* ---------- мир ---------- */
+// земля
+const grass = new THREE.Mesh(new THREE.PlaneGeometry(400,300), mat(0x55683f,1));
+grass.rotation.x = -Math.PI/2; grass.receiveShadow = true; scene.add(grass);
+const asphalt = new THREE.Mesh(new THREE.PlaneGeometry(121,91), mat(0x474c52,1));
+asphalt.rotation.x = -Math.PI/2; asphalt.position.y = .02; asphalt.receiveShadow = true; scene.add(asphalt);
+const road = new THREE.Mesh(new THREE.PlaneGeometry(10,30), mat(0x474c52,1));
+road.rotation.x = -Math.PI/2; road.position.set(0,.02,57); road.receiveShadow = true; scene.add(road);
+
+// забор (бетон) с воротами на юге
+const F = 0xa0a6ad;
+function fence(w,d,x,z){ box(w,2.4,d,F,x,1.2,z); }
+fence(122,.5, 0,-45.5);            // север
+fence(.5,91, -60.5,0);             // запад
+fence(.5,91,  60.5,0);             // восток
+fence(52,.5, -34,45.5);            // юг-запад (до ворот)
+fence(52,.5,  34,45.5);            // юг-восток
+// створ ворот: стойки + шлагбаум, пока нет СИЗ
+box(.6,3,.6, 0xd9b53a, -8,1.5,45.5); box(.6,3,.6, 0xd9b53a, 8,1.5,45.5);
+const gateBar = box(15.4,.35,.3, 0xc22, 0,1.35,45.5, false);
+const gateCollider = {type:'r', minX:-8, maxX:8, minZ:45.1, maxZ:45.9, gate:true};
+colliders.push(gateCollider);
+label('ВОРОТА · предъявите СИЗ', 0, 3.6, 45.5, .45);
+
+// резервуары
+function tank(x,z,name){
+  const t = new THREE.Mesh(new THREE.CylinderGeometry(10,10,12,36), mat(0xdde3e8,.55));
+  t.position.set(x,6,z); t.castShadow=t.receiveShadow=true; scene.add(t);
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(10.1,.22,8,40), mat(0xb9442e,.6));
+  ring.rotation.x = Math.PI/2; ring.position.set(x,10.5,z); scene.add(ring);
+  colliders.push({type:'c', x, z, r:10.3});
+  label(name, x, 14.2, z, 1.5);
+  // обвалование с проходом с юга
+  const B = 0x6b7163, h=.8, t2=.7, half=14;
+  box(2*half,h,t2, B, x, h/2, z-half);
+  box(t2,h,2*half, B, x-half, h/2, z);
+  box(t2,h,2*half, B, x+half, h/2, z);
+  box(half-2.5,h,t2, B, x-half/2-1.25, h/2, z+half);
+  box(half-2.5,h,t2, B, x+half/2+1.25, h/2, z+half);
+}
+tank(-35,-25,'РВС-1');
+tank( 35,-25,'РВС-2');
+
+// насосная станция
+box(16,4.5,10, 0xb9745a, 0,2.25,-25);
+label('НАСОСНАЯ', 0, 6, -25, 1.1);
+
+// трубопроводы
+pipe(-25,-25, -8,-25);
+pipe(  8,-25, 25,-25);
+pipe(0,-20, 0,15);
+pipe(0,15, -27,15);
+
+// задвижка №7
+const valveBody = box(1.1,1.1,1.1, 0x35506e, 0,.9,0);
+const wheel = new THREE.Mesh(new THREE.TorusGeometry(.55,.09,8,24), mat(0xc0392b,.5));
+wheel.rotation.x = Math.PI/2; wheel.position.set(0,1.7,0); scene.add(wheel);
+label('Задвижка №7', 0, 3.2, 0, .85);
+
+// эстакада налива + бензовоз
+box(10,1.2,6, 0x77674a, -38,.6,15);
+box(3.2,2.6,2.4, 0x2e6da4, -25.5,1.3,15, false);        // кабина
+const cistern = new THREE.Mesh(new THREE.CylinderGeometry(1.5,1.5,6,18), mat(0xc8cdd2,.45));
+cistern.rotation.z = Math.PI/2; cistern.position.set(-30.5,1.9,15);
+cistern.castShadow = true; scene.add(cistern);
+colliders.push({type:'c', x:-29.5, z:15, r:4.2});
+label('ЭСТАКАДА НАЛИВА', -34, 5.4, 15, 1);
+
+// пожарный щит
+box(.3,2,3, 0xc0392b, 55.6,1.6,10);
+label('Пожарный щит', 54.5, 3.6, 10, .8);
+
+// КПП и бытовка (за территорией)
+box(8,3.2,5, 0xcab27a, -10,1.6,52.5);
+label('КПП', -10, 4.4, 52.5, 1);
+box(8,3.2,5, 0x6f8f9f, 10,1.6,52.5);
+label('БЫТОВКА · СИЗ', 10, 4.4, 52.5, .9);
+
+// облако утечки (создаётся при событии)
+const cloudMat = new THREE.MeshBasicMaterial({color:0x7fd44f, transparent:true, opacity:.22, depthWrite:false});
+let cloudMesh = null;
+
+/* ---------- контрольные точки ---------- */
+const checkpoints = [
+  { id:'rvs1', name:'Резервуар РВС-1', x:-35, z:-9.5,
+    q:{ text:'Уровнемер показывает 96 % заполнения, приём нефти продолжается. Ваши действия?',
+        opts:[
+          {t:'Продолжить обход — до 100 % ещё есть запас', ok:false, why:'Перелив резервуара — одна из главных причин аварий. 96 % при продолжающемся приёме — аварийная ситуация.'},
+          {t:'Немедленно доложить оператору и потребовать остановить приём', ok:true, why:'Верно: о предаварийном уровне докладывают немедленно, приём останавливает оператор.'},
+          {t:'Самостоятельно открыть задвижку и перекачать в соседний резервуар', ok:false, why:'Переключения схемы выполняет только оператор по распоряжению — самовольные действия запрещены.'},
+        ]}},
+  { id:'rvs2', name:'Резервуар РВС-2', x:35, z:-9.5,
+    q:{ text:'В обваловании — лужа с радужной нефтяной плёнкой. Ваши действия?',
+        opts:[
+          {t:'Доложить диспетчеру, оградить место, зафиксировать в журнале', ok:true, why:'Верно: возможна утечка из резервуара или коренной задвижки — фиксируем и докладываем.'},
+          {t:'Засыпать песком и продолжить обход', ok:false, why:'Скрытие признаков утечки запрещено: причина останется и проявится аварией.'},
+          {t:'Это дождевая вода, плёнка бывает всегда — игнорировать', ok:false, why:'Нефтяная плёнка — признак разгерметизации. Игнорировать нельзя.'},
+        ]}},
+  { id:'pump', name:'Насосная станция', x:0, z:-18.5,
+    q:{ text:'У насоса №2 повышенная вибрация и посторонний шум. Ваши действия?',
+        opts:[
+          {t:'Прижать кожух рукой, чтобы оценить вибрацию', ok:false, why:'Приближаться и касаться работающего оборудования запрещено — травмоопасно.'},
+          {t:'Доложить оператору, не приближаясь к вращающимся частям', ok:true, why:'Верно: останавливает и осматривает насос персонал с допуском.'},
+          {t:'Отключить насос рубильником самостоятельно', ok:false, why:'Самовольная остановка без распоряжения может сорвать технологический режим (кроме явной угрозы жизни).'},
+        ]}},
+  { id:'valve', name:'Задвижка №7', x:0, z:1.6,
+    q:{ text:'Из-под фланца задвижки капает нефть, на земле небольшое пятно. Ваши действия?',
+        opts:[
+          {t:'Подтянуть болты фланца гаечным ключом', ok:false, why:'Подтяжка фланцев под давлением запрещена — возможен выброс продукта.'},
+          {t:'Вытереть ветошью — мелочь, не стоит внимания', ok:false, why:'Любая утечка нефтепродукта — инцидент, его обязаны зафиксировать и устранить.'},
+          {t:'Сообщить диспетчеру, обозначить место, дождаться бригаду', ok:true, why:'Верно: ремонт выполняется после снятия давления силами ремонтной бригады.'},
+        ]}},
+  { id:'fire', name:'Пожарный щит', x:53, z:10,
+    q:{ text:'На щите отсутствует один огнетушитель, ящик с песком пуст. Ваши действия?',
+        opts:[
+          {t:'Перевесить огнетушитель с соседнего щита', ok:false, why:'Так вы оголите другой пост. Комплектность восстанавливают, а не перераспределяют.'},
+          {t:'Доложить, записать в журнал, добиться доукомплектования', ok:true, why:'Верно: первичные средства пожаротушения должны быть в полном комплекте постоянно.'},
+          {t:'Рядом есть гидрант — щит не критичен', ok:false, why:'Щит — средство первой минуты тушения. Некомплект недопустим.'},
+        ]}},
+  { id:'rack', name:'Эстакада налива', x:-29.5, z:21,
+    q:{ text:'Водитель бензовоза курит в кабине во время налива топлива. Ваши действия?',
+        opts:[
+          {t:'Немедленно потребовать прекратить, остановить налив, доложить', ok:true, why:'Верно: открытый огонь в зоне налива — прямая угроза взрыва. Налив прекращается немедленно.'},
+          {t:'Сделать замечание после окончания налива', ok:false, why:'«После» может не наступить: пары топлива воспламеняются мгновенно.'},
+          {t:'Не вмешиваться — это ответственность водителя', ok:false, why:'Каждый работник обязан пресекать нарушения, угрожающие безопасности объекта.'},
+        ]}},
+];
+const locker = {x:10, z:49.4, r:3.6};
+const kpp    = {x:-10, z:49.4, r:4};
+
+for(const cp of checkpoints){
+  cp.done = false;
+  cp.marker = marker('!', '#ffd23f');
+  cp.marker.position.set(cp.x, 3, cp.z);
+  scene.add(cp.marker);
+  const li = document.createElement('li');
+  li.id = 'chk-'+cp.id; li.textContent = cp.name;
+  $('checklist').appendChild(li);
+}
+
+const gasSpots = [[8,-8],[-12,2],[15,18],[-5,-15]];
+
+/* ================= игрок и ввод ================= */
+let px=0, pz=63, yaw=0, pitch=0;
+const keys = {};
+const lockEl = () => document.pointerLockElement === canvas || document.pointerLockElement === document.body;
+let modalOpen = false;
+
+addEventListener('keydown', e=>{
+  if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault();
+  keys[e.code] = true;
+  if(!S.started || S.over || modalOpen || !lockEl()) return;
+  if(e.code==='KeyE') interact();
+  if(e.code==='KeyR') radioReport();
+});
+addEventListener('keyup', e=> keys[e.code]=false);
+
+addEventListener('mousemove', e=>{
+  if(!lockEl() || modalOpen) return;
+  yaw   -= e.movementX * .0022;
+  pitch  = clamp(pitch - e.movementY*.0022, -1.45, 1.45);
+});
+
+canvas.addEventListener('click', requestLock);
+$('pause').addEventListener('click', requestLock);
+function requestLock(){
+  if(S.started && !S.over && !modalOpen) canvas.requestPointerLock();
+}
+document.addEventListener('pointerlockchange', ()=>{
+  $('pause').classList.toggle('hidden', lockEl() || !S.started || S.over || modalOpen);
+});
+
+function collides(x,z){
+  if(x<-88 || x>88 || z<-68 || z>68) return true;
+  for(const c of colliders){
+    if(c.gate && S.ppe) continue;
+    if(c.type==='c'){ const dx=x-c.x, dz=z-c.z; if(dx*dx+dz*dz < (c.r+PR)**2) return true; }
+    else if(x>c.minX-PR && x<c.maxX+PR && z>c.minZ-PR && z<c.maxZ+PR) return true;
+  }
+  return false;
+}
+const inTerritory = () => px>-60 && px<60 && pz>-45 && pz<45;
+const dist = (x,z) => Math.hypot(px-x, pz-z);
+
+/* ================= взаимодействие ================= */
+function nearCheckpoint(){
+  let best=null, bd=4.5;
+  for(const cp of checkpoints){
+    if(cp.done) continue;
+    const d = dist(cp.x,cp.z);
+    if(d<bd){ bd=d; best=cp; }
+  }
+  return best;
+}
+
+function interact(){
+  if(!S.ppe && dist(locker.x,locker.z)<locker.r){
+    S.ppe = true;
+    gateBar.visible = false;
+    beep(1320,.12);
+    toast('СИЗ получены: каска, спецодежда, газоанализатор', 'good');
+    logLine('Получены СИЗ, допуск на территорию открыт', 'good');
+    updateHUD();
+    return;
+  }
+  if(dist(kpp.x,kpp.z)<kpp.r){
+    if(S.allDone) endGame('success');
+    else toast(`Диспетчер: сначала завершите обход (${checkpoints.filter(c=>c.done).length} из 6 точек)`);
+    return;
+  }
+  const cp = nearCheckpoint();
+  if(cp) openQuiz(cp);
+}
+
+function radioReport(){
+  const L = S.leak;
+  if(L && !L.reported){
+    if(dist(L.x,L.z) < 30){
+      L.reported = true; L.reportT = S.timeLeft;
+      beep(1320,.12);
+      addScore(150, 'Своевременный доклад об утечке — выезд аварийной бригады');
+      toast('Диспетчер: принято! Аварийная бригада выехала.', 'good');
+    } else {
+      toast('Диспетчер: уточните место — подойдите ближе к источнику загазованности.');
+    }
+  } else {
+    toast('Диспетчер: обстановка штатная, продолжайте обход.');
+  }
+}
+
+/* ---------- ситуация на точке ---------- */
+function openQuiz(cp){
+  modalOpen = true;
+  document.exitPointerLock();
+  $('pause').classList.add('hidden');
+  $('m-title').textContent = '🔍 ' + cp.name;
+  $('m-text').textContent  = cp.q.text;
+  $('m-result').className  = 'hidden';
+  $('m-next').classList.add('hidden');
+  const box = $('m-opts'); box.innerHTML = '';
+  const opts = [...cp.q.opts].sort(()=>Math.random()-.5);
+  for(const o of opts){
+    const b = document.createElement('button');
+    b.className = 'opt'; b.textContent = o.t;
+    b.onclick = ()=> answer(cp, o);
+    box.appendChild(b);
+  }
+  $('modal').classList.remove('hidden');
+}
+
+function answer(cp, o){
+  $('m-opts').innerHTML = '';
+  cp.done = true;
+  $('chk-'+cp.id).classList.add('done');
+  cp.marker.material = marker('✓', '#5ecf6a').material;
+  addScore(50, `Точка осмотрена: ${cp.name}`);
+  const res = $('m-result');
+  if(o.ok){
+    addScore(100, 'Действия по ТБ верные');
+    res.className = 'ok';
+    res.innerHTML = '<b>Верно! +150 очков.</b><br>' + o.why;
+    beep(1320,.12);
+  } else {
+    res.className = 'bad';
+    res.innerHTML = '<b>Неверные действия.</b><br>' + o.why;
+    violation('неверные действия: ' + cp.name);
+  }
+  if(S.over) return; // 3-е нарушение уже показало финал
+  if(checkpoints.every(c=>c.done)){
+    S.allDone = true;
+    toast('Обход завершён! Вернитесь на КПП и сдайте смену (E).', 'good');
+  }
+  $('m-next').classList.remove('hidden');
+}
+$('m-next').onclick = ()=>{
+  $('modal').classList.add('hidden');
+  modalOpen = false;
+  requestLock();
+};
+
+/* ================= утечка газа ================= */
+function spawnLeak(){
+  const [x,z] = gasSpots[Math.floor(Math.random()*gasSpots.length)];
+  S.leak = {x, z, born:S.timeLeft, reported:false, reportT:0};
+  cloudMesh = new THREE.Mesh(new THREE.SphereGeometry(7, 20, 14), cloudMat);
+  cloudMesh.position.set(x, 2, z);
+  scene.add(cloudMesh);
+  logLine('Газоанализатор: зафиксирован рост концентрации паров', 'bad');
+}
+function clearLeak(msg, kind){
+  if(cloudMesh){ scene.remove(cloudMesh); cloudMesh=null; }
+  S.leak = null;
+  if(msg) logLine(msg, kind);
+}
+function gasReading(){
+  if(!S.leak || !S.ppe) return 0;
+  return clamp(Math.round(100*(1 - dist(S.leak.x,S.leak.z)/25)), 0, 100);
+}
+
+/* ================= HUD ================= */
+function updateHUD(){
+  $('time').textContent  = fmt(S.timeLeft);
+  $('score').textContent = S.score;
+  $('viol').textContent  = S.violations + ' / 3';
+  $('viol').style.color  = S.violations ? '#ff6868' : '';
+  $('ppe').textContent   = S.ppe ? 'надеты ✔' : 'не получены';
+  $('ppe').style.color   = S.ppe ? '#7ddf7d' : '#ff9d5e';
+  const g = gasReading();
+  const el = $('gas');
+  if(!S.ppe){ el.textContent='—'; el.className=''; }
+  else { el.textContent = g + ' % НКПР'; el.className = g>=40?'gas-bad':(g>=15?'gas-warn':'gas-ok'); }
+}
+
+function updateHint(){
+  const h = $('hint');
+  const g = gasReading();
+  if(g>=40){ h.innerHTML = '☣ <b>ОПАСНО!</b> Покиньте загазованную зону и доложите (<b>R</b>)!'; return; }
+  if(!S.ppe){
+    h.innerHTML = dist(locker.x,locker.z)<locker.r
+      ? '<b>E</b> — получить СИЗ'
+      : 'Получите СИЗ в <b>бытовке</b> (синее здание у КПП)';
+    return;
+  }
+  if(dist(kpp.x,kpp.z)<kpp.r){
+    h.innerHTML = S.allDone ? '<b>E</b> — сдать смену' : 'КПП: сдача смены после полного обхода';
+    return;
+  }
+  const cp = nearCheckpoint();
+  if(cp){ h.innerHTML = `<b>E</b> — осмотреть: ${cp.name}`; return; }
+  if(S.allDone){ h.innerHTML = 'Обход завершён — вернитесь на <b>КПП</b>'; return; }
+  if(g>=15){ h.innerHTML = '☣ Газоанализатор фиксирует пары — найдите источник и доложите (<b>R</b>)'; return; }
+  h.innerHTML = `Осмотрено точек: <b>${checkpoints.filter(c=>c.done).length} / 6</b>`;
+}
+
+/* ================= обновление ================= */
+function update(dt){
+  S.timeLeft -= dt;
+  if(S.timeLeft<=0){ endGame('timeout'); return; }
+
+  // движение
+  const run = (keys.ShiftLeft||keys.ShiftRight);
+  const f = (keys.KeyW||keys.ArrowUp?1:0)   - (keys.KeyS||keys.ArrowDown?1:0);
+  const r = (keys.KeyD||keys.ArrowRight?1:0)- (keys.KeyA||keys.ArrowLeft?1:0);
+  const moving = f||r;
+  if(moving){
+    const sy=Math.sin(yaw), cy=Math.cos(yaw);
+    let mx = (-sy*f + cy*r), mz = (-cy*f - sy*r);
+    const ml = Math.hypot(mx,mz); mx/=ml; mz/=ml;
+    const sp = run ? 7.5 : 4.2;
+    const nx = px + mx*sp*dt, nz = pz + mz*sp*dt;
+    const blockedX = collides(nx,pz), blockedZ = collides(px,nz);
+    if(!blockedX) px = nx;
+    if(!blockedZ) pz = nz;
+    // охранник у закрытых ворот
+    if(!S.ppe && (blockedX||blockedZ) && Math.abs(px)<9 && pz>42 && pz<49 && S.gateMsgT<=0){
+      toast('Охранник: без СИЗ на территорию не пущу! Бытовка — справа.');
+      S.gateMsgT = 4;
+    }
+  }
+  S.gateMsgT -= dt;
+
+  // запрет бега на территории
+  if(run && moving && inTerritory()){
+    S.runT += dt;
+    if(S.runT > 1.5){
+      S.runT = 0;
+      if(!S.runWarned){ S.runWarned=true; toast('⚠ Бег по территории объекта запрещён! Это предупреждение.'); }
+      else violation('бег по территории объекта');
+    }
+  } else S.runT = Math.max(0, S.runT-dt);
+
+  // события утечки
+  if(!S.leak && S.leakIdx < S.leakSchedule.length && (SHIFT-S.timeLeft) >= S.leakSchedule[S.leakIdx]){
+    S.leakIdx++; spawnLeak();
+  }
+  if(S.leak){
+    const age = S.leak.born - S.timeLeft;
+    if(!S.leak.reported && age > 55){
+      violation('утечка не обнаружена вовремя — разлив зафиксировал оператор');
+      clearLeak('Утечка устранена силами смены операторов', 'bad');
+    } else if(S.leak.reported && (S.leak.reportT - S.timeLeft) > 8){
+      clearLeak('Аварийная бригада устранила утечку', 'good');
+    }
+    if(cloudMesh){
+      const k = 1 + Math.sin(performance.now()/300)*.12;
+      cloudMesh.scale.set(k,k*.7,k);
+      cloudMat.opacity = .16 + Math.sin(performance.now()/300)*.05;
+    }
+  }
+
+  // загазованность: сигнал и экспозиция
+  const g = gasReading();
+  if(g>10){
+    S.beepT -= dt;
+    if(S.beepT<=0){ beep(1760,.06,.1); S.beepT = clamp(1 - g/120, .12, .9); }
+  }
+  if(g>=40){
+    S.expoT += dt;
+    if(S.expoT > 2.5){ violation('находился в загазованной зоне'); S.expoT = -2.5; }
+  } else S.expoT = Math.max(-2.5, Math.min(S.expoT, 0)) + 0; // вне зоны счётчик не растёт
+
+  // маркеры точек: лёгкое покачивание
+  const bob = Math.sin(performance.now()/450)*.25;
+  for(const cp of checkpoints) cp.marker.position.y = 3 + bob;
+
+  camera.position.set(px, 1.7, pz);
+  camera.rotation.y = yaw;
+  camera.rotation.x = pitch;
+
+  updateHUD();
+  updateHint();
+}
+
+/* ================= финал ================= */
+function endGame(reason){
+  if(S.over) return;
+  S.over = true;
+  modalOpen = true;
+  document.exitPointerLock();
+  $('modal').classList.add('hidden');
+  $('pause').classList.add('hidden');
+
+  const done = checkpoints.filter(c=>c.done).length;
+  let title, text, rank, rankCls;
+  if(reason==='fired'){
+    title = '⛔ ОТСТРАНЕНИЕ ОТ РАБОТЫ';
+    text  = 'Три нарушения требований безопасности за смену. Начальник участка отстранил вас от работы и назначил внеочередную проверку знаний.';
+    rank  = 'Уволен за систематические нарушения ТБ'; rankCls='bad';
+  } else if(reason==='timeout'){
+    title = '🕐 СМЕНА ОКОНЧЕНА';
+    text  = done===6
+      ? 'Время вышло, но вы не успели сдать смену на КПП. Обход засчитан частично.'
+      : 'Время смены истекло, обход не завершён. Несмотренные точки — риск пропущенной аварии.';
+    rank  = 'Обход не завершён — проведён разбор смены'; rankCls='mid';
+  } else {
+    const bonus = Math.round(S.timeLeft);
+    S.score += bonus;
+    title = '✅ СМЕНА СДАНА';
+    text  = `Обход выполнен полностью, смена сдана на КПП. Бонус за оставшееся время: +${bonus} очков.`;
+    if(S.violations===0){ rank='🏆 Образцовый обходчик — благодарность в приказе'; rankCls='good'; }
+    else if(S.violations===1){ rank='Хорошо, но есть замечание по ТБ'; rankCls='mid'; }
+    else { rank='Удовлетворительно — направлен на внеплановый инструктаж'; rankCls='mid'; }
+  }
+  $('e-title').textContent = title;
+  $('e-text').textContent  = text;
+  $('e-points').textContent= done + ' / 6';
+  $('e-viol').textContent  = S.violations;
+  $('e-score').textContent = S.score;
+  const rEl = $('e-rank'); rEl.textContent = rank; rEl.className = 'rank '+rankCls;
+  $('end').classList.remove('hidden');
+}
+
+/* ================= запуск ================= */
+$('btn-start').onclick = ()=>{
+  $('start').classList.add('hidden');
+  S.started = true;
+  modalOpen = false;
+  beep(880,.08);
+  updateHUD();
+  canvas.requestPointerLock();
+};
+
+const clock = new THREE.Clock();
+function animate(){
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), .05);
+  if(S.started && !S.over && !modalOpen && lockEl()) update(dt);
+  $('pause').classList.toggle('hidden', lockEl() || !S.started || S.over || modalOpen);
+  renderer.render(scene, camera);
+}
+camera.position.set(px,1.7,pz);
+updateHUD();
+$('hint').innerHTML = 'Пройдите инструктаж';
+animate();
+</script>
+</body>
+</html>
