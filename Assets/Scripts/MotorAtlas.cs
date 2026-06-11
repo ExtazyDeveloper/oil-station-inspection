@@ -6,7 +6,7 @@ using UnityEngine.InputSystem.UI;
 using UnityEngine.UI;
 
 /// Интерактивный 3D-атлас электродвигателя: орбитальная камера, список деталей,
-/// подсветка выбранной детали (остальные становятся полупрозрачными).
+/// подсветка выбранной детали, режим изоляции («рассмотреть отдельно»).
 public class MotorAtlas : MonoBehaviour
 {
     class Entry
@@ -16,6 +16,8 @@ public class MotorAtlas : MonoBehaviour
         { Title = title; Definition = def; IncludeChildren = children; Meshes = meshes; }
         public List<Renderer> Renderers = new List<Renderer>();
         public Button Button;
+        public Text Label;
+        public GameObject SelBar;
     }
 
     static readonly Entry[] Entries =
@@ -82,6 +84,10 @@ public class MotorAtlas : MonoBehaviour
     public float MaxZoom = 6f;
     [Tooltip("Скорость вращения камеры мышью, град/пиксель")]
     public float RotateSpeed = 0.25f;
+    [Tooltip("Скорость автоповорота в простое, град/с (0 — выключить)")]
+    public float IdleSpinSpeed = 6f;
+    [Tooltip("Через сколько секунд простоя включается автоповорот")]
+    public float IdleDelay = 4f;
 
     Transform _motor;
     Camera _cam;
@@ -90,15 +96,15 @@ public class MotorAtlas : MonoBehaviour
     // орбитальная камера
     Vector3 _target;
     float _yaw = -35f, _pitch = 18f, _dist = 2.2f;
-    float _dragAccum;
+    float _dragAccum, _idleT;
 
-    // материалы
+    // материалы и выбор
     readonly Dictionary<Renderer, Material[]> _originals = new Dictionary<Renderer, Material[]>();
     readonly Dictionary<Transform, Entry> _pickMap = new Dictionary<Transform, Entry>();
     Material _ghostMat;
     Entry _selected;
 
-    // режим «рассмотреть отдельно»
+    // изоляция
     bool _isolated;
     Vector3 _homeTarget;
     float _homeDist;
@@ -107,9 +113,15 @@ public class MotorAtlas : MonoBehaviour
 
     // UI
     Text _titleText, _defText;
-    static readonly Color Accent = new Color(1f, 0.82f, 0.25f);
-    static readonly Color BtnNormal = new Color(0.13f, 0.18f, 0.24f, 0.95f);
-    static readonly Color BtnActive = new Color(0.85f, 0.65f, 0.15f, 0.95f);
+    static Sprite _roundedSprite;
+
+    /* ---------- палитра ---------- */
+    static readonly Color Accent     = new Color(0.91f, 0.76f, 0.35f);          // тёплое золото
+    static readonly Color PanelBg    = new Color(0.05f, 0.06f, 0.08f, 0.92f);
+    static readonly Color ItemHover  = new Color(1f, 1f, 1f, 0.07f);
+    static readonly Color ItemSel    = new Color(0.91f, 0.76f, 0.35f, 0.14f);
+    static readonly Color TextMain   = new Color(0.88f, 0.90f, 0.93f);
+    static readonly Color TextDim    = new Color(0.55f, 0.59f, 0.65f);
 
     void Start()
     {
@@ -119,23 +131,20 @@ public class MotorAtlas : MonoBehaviour
         if (motorGo == null) { Debug.LogError("Объект 'Motor' не найден в сцене"); return; }
         _motor = motorGo.transform;
 
-        // центр модели и стартовая дистанция камеры
         var bounds = new Bounds(_motor.position, Vector3.zero);
         foreach (var r in _motor.GetComponentsInChildren<Renderer>()) bounds.Encapsulate(r.bounds);
         _target = bounds.center;
-        _dist = bounds.size.magnitude * 1.4f;
+        _dist = bounds.size.magnitude * 1.35f;
         _homeTarget = _target;
         _homeDist = _dist;
 
-        // коллайдеры для кликов + кэш материалов
         foreach (var r in _motor.GetComponentsInChildren<Renderer>())
         {
             _originals[r] = r.sharedMaterials;
             if (r.GetComponent<Collider>() == null) r.gameObject.AddComponent<MeshCollider>();
         }
 
-        // привязка мешей к статьям атласа: по имени объекта и по имени меша
-        // (корень модели переименован в «Motor», но его меш остался SM_DVP52)
+        // привязка мешей: по имени объекта и по имени меша
         var byName = new Dictionary<string, Transform>();
         foreach (var t in _motor.GetComponentsInChildren<Transform>())
             if (!byName.ContainsKey(t.name)) byName[t.name] = t;
@@ -146,27 +155,22 @@ public class MotorAtlas : MonoBehaviour
         foreach (var e in Entries)
         {
             e.Renderers.Clear(); // Entries статичен — чистим между запусками Play Mode
-            e.Button = null;
+            e.Button = null; e.Label = null; e.SelBar = null;
             foreach (var meshName in e.Meshes)
             {
-                if (!byName.TryGetValue(meshName, out var t))
-                {
-                    Debug.LogWarning($"Атлас: меш '{meshName}' не найден ({e.Title})");
-                    continue;
-                }
+                if (!byName.TryGetValue(meshName, out var t)) continue;
                 if (e.IncludeChildren) e.Renderers.AddRange(t.GetComponentsInChildren<Renderer>());
                 else { var r = t.GetComponent<Renderer>(); if (r != null) e.Renderers.Add(r); }
                 if (!e.IncludeChildren && !_pickMap.ContainsKey(t)) _pickMap[t] = e;
             }
         }
-        // сборные статьи кликаются в последнюю очередь
         foreach (var e in Entries)
             if (e.IncludeChildren)
                 foreach (var meshName in e.Meshes)
                     if (byName.TryGetValue(meshName, out var t) && !_pickMap.ContainsKey(t))
                         _pickMap[t] = e;
 
-        _ghostMat = DepotBuilder.TransparentUnlit(new Color(0.65f, 0.75f, 0.85f, 0.08f));
+        _ghostMat = DepotBuilder.TransparentUnlit(new Color(0.65f, 0.75f, 0.85f, 0.07f));
 
         BuildUI();
     }
@@ -185,6 +189,7 @@ public class MotorAtlas : MonoBehaviour
         {
             Vector2 d = ms.delta.ReadValue();
             _dragAccum += d.magnitude;
+            if (d.sqrMagnitude > 0.01f) _idleT = 0f;
             _yaw += d.x * RotateSpeed;
             _pitch = Mathf.Clamp(_pitch - d.y * RotateSpeed, -80f, 80f);
         }
@@ -193,11 +198,21 @@ public class MotorAtlas : MonoBehaviour
             // у колеса мыши один щелчок = 120 единиц scroll
             float notches = ms.scroll.ReadValue().y / 120f;
             if (Mathf.Abs(notches) > 0.001f)
+            {
+                _idleT = 0f;
                 _dist = Mathf.Clamp(_dist * (1f - notches * ZoomStep), MinZoom, MaxZoom);
+            }
         }
-        // клик (не перетаскивание) — выбор детали в 3D
         if (ms.leftButton.wasReleasedThisFrame && _dragAccum < 6f && !overUI)
             PickAtPointer(ms.position.ReadValue());
+
+        // плавный автоповорот в простое
+        _idleT += Time.deltaTime;
+        if (IdleSpinSpeed > 0f && _idleT > IdleDelay)
+        {
+            float fade = Mathf.Clamp01((_idleT - IdleDelay) / 2f);
+            _yaw += IdleSpinSpeed * fade * Time.deltaTime;
+        }
 
         var rot = Quaternion.Euler(_pitch, _yaw, 0f);
         _cam.transform.position = _target + rot * new Vector3(0f, 0f, -_dist);
@@ -216,23 +231,26 @@ public class MotorAtlas : MonoBehaviour
         Select(null);
     }
 
-    /* ================= выбор и подсветка ================= */
+    /* ================= выбор, подсветка, изоляция ================= */
 
     void Select(Entry entry)
     {
-        // выйти из режима изоляции и вернуть исходные материалы
         SetIsolation(false);
         foreach (var kv in _originals)
             if (kv.Key != null) kv.Key.sharedMaterials = kv.Value;
 
         foreach (var e in Entries)
-            if (e.Button != null) e.Button.image.color = BtnNormal;
+        {
+            if (e.Button != null) e.Button.image.color = Color.clear;
+            if (e.Label != null) e.Label.color = TextMain;
+            if (e.SelBar != null) e.SelBar.SetActive(false);
+        }
 
         _selected = entry;
         if (entry == null)
         {
             _titleText.text = "Выберите деталь";
-            _defText.text = "Кликните по детали двигателя или выберите её в списке слева.\n\nВращение — левая кнопка мыши, масштаб — колесо.";
+            _defText.text = "Кликните по детали двигателя или выберите её в списке слева.";
             _isolateBtn.gameObject.SetActive(false);
             return;
         }
@@ -246,14 +264,14 @@ public class MotorAtlas : MonoBehaviour
             kv.Key.sharedMaterials = ghosts;
         }
 
-        if (entry.Button != null) entry.Button.image.color = BtnActive;
+        if (entry.Button != null) entry.Button.image.color = ItemSel;
+        if (entry.Label != null) entry.Label.color = Accent;
+        if (entry.SelBar != null) entry.SelBar.SetActive(true);
         _titleText.text = entry.Title;
-        _defText.text = entry.Definition + "\n\n<color=#7a8694>Меши: " + string.Join(", ", entry.Meshes) + "</color>";
+        _defText.text = entry.Definition + "\n\n<color=#6f7884>Меши: " + string.Join(", ", entry.Meshes) + "</color>";
         _isolateBtn.gameObject.SetActive(true);
     }
 
-    /// Режим «рассмотреть отдельно»: скрывает все остальные детали
-    /// и наводит камеру на выбранную.
     void SetIsolation(bool on)
     {
         if (on && _selected == null) return;
@@ -267,7 +285,6 @@ public class MotorAtlas : MonoBehaviour
             foreach (var kv in _originals)
                 if (kv.Key != null) kv.Key.enabled = keep.Contains(kv.Key);
 
-            // камера — на деталь
             var b = new Bounds(_selected.Renderers[0].bounds.center, Vector3.zero);
             foreach (var r in _selected.Renderers) b.Encapsulate(r.bounds);
             _target = b.center;
@@ -299,24 +316,28 @@ public class MotorAtlas : MonoBehaviour
         if (FindFirstObjectByType<EventSystem>() == null)
             new GameObject("EventSystem", typeof(EventSystem), typeof(InputSystemUIInputModule));
 
-        // заголовок
-        var header = Panel(canvas.transform, new Vector2(0.5f, 1f), new Vector2(0.5f, 1f),
-            new Vector2(-440f, -64f), new Vector2(440f, -10f), new Color(0.04f, 0.06f, 0.09f, 0.8f));
-        var title = Txt(header.transform, "АТЛАС ЭЛЕКТРОДВИГАТЕЛЯ ПОСТОЯННОГО ТОКА", 28, Accent, TextAnchor.MiddleCenter);
-        Fill(title.rectTransform);
+        // заголовок без плашки
+        var title = Txt(canvas.transform, "АТЛАС ЭЛЕКТРОДВИГАТЕЛЯ ПОСТОЯННОГО ТОКА", 24, Accent, TextAnchor.MiddleCenter);
+        var trt0 = title.rectTransform;
+        trt0.anchorMin = new Vector2(0.5f, 1f); trt0.anchorMax = new Vector2(0.5f, 1f);
+        trt0.offsetMin = new Vector2(-440f, -52f); trt0.offsetMax = new Vector2(440f, -14f);
+        var sub = Txt(canvas.transform, "ДПВ-52  ·  интерактивный разбор конструкции", 15, TextDim, TextAnchor.MiddleCenter);
+        var srt = sub.rectTransform;
+        srt.anchorMin = new Vector2(0.5f, 1f); srt.anchorMax = new Vector2(0.5f, 1f);
+        srt.offsetMin = new Vector2(-440f, -76f); srt.offsetMax = new Vector2(440f, -50f);
 
-        // левая панель со списком деталей
+        // левая панель — список деталей
         var listPanel = Panel(canvas.transform, new Vector2(0f, 0f), new Vector2(0f, 1f),
-            new Vector2(10f, 10f), new Vector2(340f, -74f), new Color(0.04f, 0.06f, 0.09f, 0.85f));
+            new Vector2(16f, 16f), new Vector2(346f, -88f), PanelBg, true);
 
         var content = new GameObject("Content", typeof(RectTransform));
         content.transform.SetParent(listPanel.transform, false);
         var crt = (RectTransform)content.transform;
         crt.anchorMin = new Vector2(0f, 1f); crt.anchorMax = new Vector2(1f, 1f);
         crt.pivot = new Vector2(0.5f, 1f);
-        crt.offsetMin = new Vector2(8f, 0f); crt.offsetMax = new Vector2(-8f, 0f);
+        crt.offsetMin = new Vector2(6f, 0f); crt.offsetMax = new Vector2(-6f, 0f);
 
-        float y = -8f;
+        float y = -10f;
         for (int i = 0; i < Entries.Length; i++)
         {
             var e = Entries[i];
@@ -325,18 +346,43 @@ public class MotorAtlas : MonoBehaviour
             var brt = (RectTransform)btnGo.transform;
             brt.anchorMin = new Vector2(0f, 1f); brt.anchorMax = new Vector2(1f, 1f);
             brt.pivot = new Vector2(0.5f, 1f);
-            brt.offsetMin = new Vector2(0f, y - 50f); brt.offsetMax = new Vector2(0f, y);
+            brt.offsetMin = new Vector2(0f, y - 48f); brt.offsetMax = new Vector2(0f, y);
             var img = btnGo.AddComponent<Image>();
-            img.color = BtnNormal;
+            img.sprite = Rounded(); img.type = Image.Type.Sliced;
+            img.color = Color.clear;
             var btn = btnGo.AddComponent<Button>();
+            var cb = btn.colors;
+            cb.normalColor = Color.white;
+            cb.highlightedColor = new Color(1f, 1f, 1f, 1f);
+            btn.colors = cb;
+            var hover = btnGo.AddComponent<HoverTint>();
+            hover.Target = img; hover.HoverColor = ItemHover;
             var captured = e;
             btn.onClick.AddListener(() => Select(captured));
             e.Button = btn;
-            var label = Txt(btnGo.transform, $"{i + 1}. {e.Title}", 20, Color.white, TextAnchor.MiddleLeft);
-            Fill(label.rectTransform, 12f, 4f);
-            y -= 54f;
+
+            // акцентная полоса слева у выбранного пункта
+            var bar = new GameObject("SelBar", typeof(RectTransform));
+            bar.transform.SetParent(btnGo.transform, false);
+            var barRt = (RectTransform)bar.transform;
+            barRt.anchorMin = new Vector2(0f, 0.18f); barRt.anchorMax = new Vector2(0f, 0.82f);
+            barRt.offsetMin = new Vector2(2f, 0f); barRt.offsetMax = new Vector2(5f, 0f);
+            bar.AddComponent<Image>().color = Accent;
+            bar.SetActive(false);
+            e.SelBar = bar;
+
+            var num = Txt(btnGo.transform, (i + 1).ToString("00"), 15, TextDim, TextAnchor.MiddleLeft);
+            var nrt = num.rectTransform;
+            nrt.anchorMin = Vector2.zero; nrt.anchorMax = new Vector2(0f, 1f);
+            nrt.offsetMin = new Vector2(14f, 0f); nrt.offsetMax = new Vector2(44f, 0f);
+            var label = Txt(btnGo.transform, e.Title, 18, TextMain, TextAnchor.MiddleLeft);
+            var lrt = label.rectTransform;
+            lrt.anchorMin = Vector2.zero; lrt.anchorMax = Vector2.one;
+            lrt.offsetMin = new Vector2(46f, 2f); lrt.offsetMax = new Vector2(-8f, -2f);
+            e.Label = label;
+            y -= 50f;
         }
-        crt.sizeDelta = new Vector2(0f, -y + 8f);
+        crt.sizeDelta = new Vector2(0f, -y + 10f);
 
         var scroll = listPanel.gameObject.AddComponent<ScrollRect>();
         scroll.content = crt;
@@ -345,51 +391,65 @@ public class MotorAtlas : MonoBehaviour
         scroll.scrollSensitivity = 30f;
         listPanel.gameObject.AddComponent<RectMask2D>();
 
-        // нижняя панель с описанием
+        // карточка описания — снизу справа от списка
         var defPanel = Panel(canvas.transform, new Vector2(0f, 0f), new Vector2(1f, 0f),
-            new Vector2(352f, 10f), new Vector2(-10f, 264f), new Color(0.04f, 0.06f, 0.09f, 0.85f));
-        _titleText = Txt(defPanel.transform, "", 26, Accent, TextAnchor.UpperLeft);
+            new Vector2(362f, 16f), new Vector2(-16f, 246f), PanelBg, true);
+        _titleText = Txt(defPanel.transform, "", 24, Accent, TextAnchor.UpperLeft);
         var trt = _titleText.rectTransform;
         trt.anchorMin = new Vector2(0f, 1f); trt.anchorMax = new Vector2(1f, 1f);
-        trt.offsetMin = new Vector2(16f, -46f); trt.offsetMax = new Vector2(-16f, -8f);
-        _defText = Txt(defPanel.transform, "", 19, new Color(0.88f, 0.91f, 0.94f), TextAnchor.UpperLeft);
+        trt.offsetMin = new Vector2(20f, -48f); trt.offsetMax = new Vector2(-20f, -12f);
+        _defText = Txt(defPanel.transform, "", 18, new Color(0.78f, 0.82f, 0.86f), TextAnchor.UpperLeft);
         var drt = _defText.rectTransform;
         drt.anchorMin = Vector2.zero; drt.anchorMax = Vector2.one;
-        drt.offsetMin = new Vector2(16f, 10f); drt.offsetMax = new Vector2(-16f, -50f);
+        drt.offsetMin = new Vector2(20f, 12f); drt.offsetMax = new Vector2(-20f, -52f);
 
-        // кнопка сброса
-        var resetGo = new GameObject("Reset", typeof(RectTransform));
-        resetGo.transform.SetParent(canvas.transform, false);
-        var rrt = (RectTransform)resetGo.transform;
-        rrt.anchorMin = rrt.anchorMax = new Vector2(1f, 1f);
-        rrt.offsetMin = new Vector2(-180f, -58f); rrt.offsetMax = new Vector2(-10f, -10f);
-        var rimg = resetGo.AddComponent<Image>();
-        rimg.color = BtnNormal;
-        resetGo.AddComponent<Button>().onClick.AddListener(() => Select(null));
-        var rl = Txt(resetGo.transform, "Сбросить выбор", 20, Color.white, TextAnchor.MiddleCenter);
-        Fill(rl.rectTransform);
+        // кнопки справа сверху
+        _isolateBtn = MakeButton(canvas.transform, "Рассмотреть отдельно",
+            new Vector2(-486f, -60f), new Vector2(-236f, -16f), Accent, new Color(0.12f, 0.1f, 0.04f),
+            () => SetIsolation(!_isolated), out _isolateBtnText);
+        MakeButton(canvas.transform, "Сбросить выбор",
+            new Vector2(-220f, -60f), new Vector2(-16f, -16f), new Color(1f, 1f, 1f, 0.08f), TextMain,
+            () => Select(null), out _);
 
-        // кнопка «рассмотреть отдельно» (видна при выбранной детали)
-        var isoGo = new GameObject("Isolate", typeof(RectTransform));
-        isoGo.transform.SetParent(canvas.transform, false);
-        var irt = (RectTransform)isoGo.transform;
-        irt.anchorMin = irt.anchorMax = new Vector2(1f, 1f);
-        irt.offsetMin = new Vector2(-460f, -58f); irt.offsetMax = new Vector2(-190f, -10f);
-        var iimg = isoGo.AddComponent<Image>();
-        iimg.color = BtnNormal;
-        _isolateBtn = isoGo.AddComponent<Button>();
-        _isolateBtn.onClick.AddListener(() => SetIsolation(!_isolated));
-        _isolateBtnText = Txt(isoGo.transform, "Рассмотреть отдельно", 20, Accent, TextAnchor.MiddleCenter);
-        Fill(_isolateBtnText.rectTransform);
+        // подсказка по управлению
+        var hint = Txt(canvas.transform, "ЛКМ — вращение   ·   колесо — масштаб   ·   клик по детали — выбор", 14, TextDim, TextAnchor.MiddleCenter);
+        var hrt = hint.rectTransform;
+        hrt.anchorMin = new Vector2(0.5f, 0f); hrt.anchorMax = new Vector2(0.5f, 0f);
+        hrt.offsetMin = new Vector2(-400f, 252f); hrt.offsetMax = new Vector2(400f, 278f);
 
         Select(null);
     }
 
-    Image Panel(Transform parent, Vector2 aMin, Vector2 aMax, Vector2 oMin, Vector2 oMax, Color color)
+    Button MakeButton(Transform parent, string label, Vector2 oMin, Vector2 oMax,
+        Color bg, Color fg, UnityEngine.Events.UnityAction onClick, out Text textRef)
+    {
+        var go = new GameObject("Button", typeof(RectTransform));
+        go.transform.SetParent(parent, false);
+        var rt = (RectTransform)go.transform;
+        rt.anchorMin = rt.anchorMax = new Vector2(1f, 1f);
+        rt.offsetMin = oMin; rt.offsetMax = oMax;
+        var img = go.AddComponent<Image>();
+        img.sprite = Rounded(); img.type = Image.Type.Sliced;
+        img.color = bg;
+        var btn = go.AddComponent<Button>();
+        var cb = btn.colors;
+        cb.highlightedColor = new Color(1.12f, 1.12f, 1.12f, 1f);
+        cb.pressedColor = new Color(0.9f, 0.9f, 0.9f, 1f);
+        btn.colors = cb;
+        btn.onClick.AddListener(onClick);
+        textRef = Txt(go.transform, label, 18, fg, TextAnchor.MiddleCenter);
+        var lrt = textRef.rectTransform;
+        lrt.anchorMin = Vector2.zero; lrt.anchorMax = Vector2.one;
+        lrt.offsetMin = new Vector2(8f, 2f); lrt.offsetMax = new Vector2(-8f, -2f);
+        return btn;
+    }
+
+    Image Panel(Transform parent, Vector2 aMin, Vector2 aMax, Vector2 oMin, Vector2 oMax, Color color, bool rounded = false)
     {
         var go = new GameObject("Panel", typeof(RectTransform));
         go.transform.SetParent(parent, false);
         var img = go.AddComponent<Image>();
+        if (rounded) { img.sprite = Rounded(); img.type = Image.Type.Sliced; }
         img.color = color;
         var rt = (RectTransform)go.transform;
         rt.anchorMin = aMin; rt.anchorMax = aMax; rt.offsetMin = oMin; rt.offsetMax = oMax;
@@ -409,9 +469,37 @@ public class MotorAtlas : MonoBehaviour
         return t;
     }
 
-    static void Fill(RectTransform rt, float padX = 0f, float padY = 0f)
+    /// Процедурный спрайт со скруглёнными углами (9-slice).
+    static Sprite Rounded()
     {
-        rt.anchorMin = Vector2.zero; rt.anchorMax = Vector2.one;
-        rt.offsetMin = new Vector2(padX, padY); rt.offsetMax = new Vector2(-padX, -padY);
+        if (_roundedSprite != null) return _roundedSprite;
+        const int s = 32, r = 10;
+        var tex = new Texture2D(s, s, TextureFormat.ARGB32, false);
+        for (int yPix = 0; yPix < s; yPix++)
+            for (int x = 0; x < s; x++)
+            {
+                float ax = Mathf.Max(0f, Mathf.Max(r - x, x - (s - 1 - r)));
+                float ay = Mathf.Max(0f, Mathf.Max(r - yPix, yPix - (s - 1 - r)));
+                float a = (ax > 0f && ay > 0f)
+                    ? Mathf.Clamp01(r - Mathf.Sqrt(ax * ax + ay * ay) + 0.5f)
+                    : 1f;
+                tex.SetPixel(x, yPix, new Color(1f, 1f, 1f, a));
+            }
+        tex.Apply();
+        _roundedSprite = Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.5f),
+            100f, 0, SpriteMeshType.FullRect, new Vector4(r + 2, r + 2, r + 2, r + 2));
+        return _roundedSprite;
     }
+}
+
+/// Подсветка фона элемента при наведении курсора.
+public class HoverTint : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler
+{
+    public Image Target;
+    public Color HoverColor;
+    Color _base;
+    bool _hovered;
+
+    public void OnPointerEnter(PointerEventData e) { _base = Target.color; _hovered = true; if (_base.a < 0.01f) Target.color = HoverColor; }
+    public void OnPointerExit(PointerEventData e) { if (_hovered && Target.color == HoverColor) Target.color = _base; _hovered = false; }
 }
