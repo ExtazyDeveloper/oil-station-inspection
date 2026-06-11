@@ -73,6 +73,16 @@ public class MotorAtlas : MonoBehaviour
             false, "SM_Fan"),
     };
 
+    [Header("Камера")]
+    [Tooltip("Доля дистанции, на которую меняется зум за один щелчок колеса (0.13 = 13 %)")]
+    public float ZoomStep = 0.13f;
+    [Tooltip("Минимальная дистанция камеры до детали, м")]
+    public float MinZoom = 0.15f;
+    [Tooltip("Максимальная дистанция камеры, м")]
+    public float MaxZoom = 6f;
+    [Tooltip("Скорость вращения камеры мышью, град/пиксель")]
+    public float RotateSpeed = 0.25f;
+
     Transform _motor;
     Camera _cam;
     Font _font;
@@ -87,6 +97,13 @@ public class MotorAtlas : MonoBehaviour
     readonly Dictionary<Transform, Entry> _pickMap = new Dictionary<Transform, Entry>();
     Material _ghostMat;
     Entry _selected;
+
+    // режим «рассмотреть отдельно»
+    bool _isolated;
+    Vector3 _homeTarget;
+    float _homeDist;
+    Button _isolateBtn;
+    Text _isolateBtnText;
 
     // UI
     Text _titleText, _defText;
@@ -107,6 +124,8 @@ public class MotorAtlas : MonoBehaviour
         foreach (var r in _motor.GetComponentsInChildren<Renderer>()) bounds.Encapsulate(r.bounds);
         _target = bounds.center;
         _dist = bounds.size.magnitude * 1.4f;
+        _homeTarget = _target;
+        _homeDist = _dist;
 
         // коллайдеры для кликов + кэш материалов
         foreach (var r in _motor.GetComponentsInChildren<Renderer>())
@@ -166,14 +185,15 @@ public class MotorAtlas : MonoBehaviour
         {
             Vector2 d = ms.delta.ReadValue();
             _dragAccum += d.magnitude;
-            _yaw += d.x * 0.25f;
-            _pitch = Mathf.Clamp(_pitch - d.y * 0.25f, -80f, 80f);
+            _yaw += d.x * RotateSpeed;
+            _pitch = Mathf.Clamp(_pitch - d.y * RotateSpeed, -80f, 80f);
         }
         if (!overUI)
         {
-            float scroll = ms.scroll.ReadValue().y;
-            if (Mathf.Abs(scroll) > 0.01f)
-                _dist = Mathf.Clamp(_dist - scroll * 0.0012f, 0.5f, 6f);
+            // у колеса мыши один щелчок = 120 единиц scroll
+            float notches = ms.scroll.ReadValue().y / 120f;
+            if (Mathf.Abs(notches) > 0.001f)
+                _dist = Mathf.Clamp(_dist * (1f - notches * ZoomStep), MinZoom, MaxZoom);
         }
         // клик (не перетаскивание) — выбор детали в 3D
         if (ms.leftButton.wasReleasedThisFrame && _dragAccum < 6f && !overUI)
@@ -200,7 +220,8 @@ public class MotorAtlas : MonoBehaviour
 
     void Select(Entry entry)
     {
-        // вернуть исходные материалы
+        // выйти из режима изоляции и вернуть исходные материалы
+        SetIsolation(false);
         foreach (var kv in _originals)
             if (kv.Key != null) kv.Key.sharedMaterials = kv.Value;
 
@@ -212,6 +233,7 @@ public class MotorAtlas : MonoBehaviour
         {
             _titleText.text = "Выберите деталь";
             _defText.text = "Кликните по детали двигателя или выберите её в списке слева.\n\nВращение — левая кнопка мыши, масштаб — колесо.";
+            _isolateBtn.gameObject.SetActive(false);
             return;
         }
 
@@ -227,6 +249,37 @@ public class MotorAtlas : MonoBehaviour
         if (entry.Button != null) entry.Button.image.color = BtnActive;
         _titleText.text = entry.Title;
         _defText.text = entry.Definition + "\n\n<color=#7a8694>Меши: " + string.Join(", ", entry.Meshes) + "</color>";
+        _isolateBtn.gameObject.SetActive(true);
+    }
+
+    /// Режим «рассмотреть отдельно»: скрывает все остальные детали
+    /// и наводит камеру на выбранную.
+    void SetIsolation(bool on)
+    {
+        if (on && _selected == null) return;
+        if (_isolated == on) return;
+        _isolated = on;
+        _isolateBtnText.text = on ? "Показать весь двигатель" : "Рассмотреть отдельно";
+
+        if (on)
+        {
+            var keep = new HashSet<Renderer>(_selected.Renderers);
+            foreach (var kv in _originals)
+                if (kv.Key != null) kv.Key.enabled = keep.Contains(kv.Key);
+
+            // камера — на деталь
+            var b = new Bounds(_selected.Renderers[0].bounds.center, Vector3.zero);
+            foreach (var r in _selected.Renderers) b.Encapsulate(r.bounds);
+            _target = b.center;
+            _dist = Mathf.Clamp(b.size.magnitude * 1.8f, MinZoom, MaxZoom);
+        }
+        else
+        {
+            foreach (var kv in _originals)
+                if (kv.Key != null) kv.Key.enabled = true;
+            _target = _homeTarget;
+            _dist = _homeDist;
+        }
     }
 
     /* ================= UI ================= */
@@ -315,6 +368,19 @@ public class MotorAtlas : MonoBehaviour
         resetGo.AddComponent<Button>().onClick.AddListener(() => Select(null));
         var rl = Txt(resetGo.transform, "Сбросить выбор", 20, Color.white, TextAnchor.MiddleCenter);
         Fill(rl.rectTransform);
+
+        // кнопка «рассмотреть отдельно» (видна при выбранной детали)
+        var isoGo = new GameObject("Isolate", typeof(RectTransform));
+        isoGo.transform.SetParent(canvas.transform, false);
+        var irt = (RectTransform)isoGo.transform;
+        irt.anchorMin = irt.anchorMax = new Vector2(1f, 1f);
+        irt.offsetMin = new Vector2(-460f, -58f); irt.offsetMax = new Vector2(-190f, -10f);
+        var iimg = isoGo.AddComponent<Image>();
+        iimg.color = BtnNormal;
+        _isolateBtn = isoGo.AddComponent<Button>();
+        _isolateBtn.onClick.AddListener(() => SetIsolation(!_isolated));
+        _isolateBtnText = Txt(isoGo.transform, "Рассмотреть отдельно", 20, Accent, TextAnchor.MiddleCenter);
+        Fill(_isolateBtnText.rectTransform);
 
         Select(null);
     }
