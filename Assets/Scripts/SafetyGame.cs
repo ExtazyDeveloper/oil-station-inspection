@@ -26,7 +26,7 @@ public class SafetyGame : MonoBehaviour
     float _expoT, _beepT;
 
     // утечка
-    class Leak { public Vector3 Pos; public float Age; public bool Reported; public float SinceReport; public GameObject Cloud; }
+    class Leak { public Vector3 Pos; public float Age; public bool Reported; public float SinceReport; public GameObject Cloud; public bool AlarmSaid; }
     Leak _leak;
     float[] _leakSchedule;
     int _leakIdx;
@@ -37,8 +37,11 @@ public class SafetyGame : MonoBehaviour
     PlayerFPS _player;
     Transform _playerT;
     AudioSource _audio;
+    AudioSource _radio;
+    AudioClip _pttClick;
     readonly List<Checkpoint> _checkpoints = new List<Checkpoint>();
     readonly Dictionary<float, AudioClip> _beepCache = new Dictionary<float, AudioClip>();
+    readonly Dictionary<string, AudioClip> _voiceCache = new Dictionary<string, AudioClip>();
 
     public bool InputLocked => !_started || _over || (_ui != null && _ui.ModalOpen);
 
@@ -91,6 +94,14 @@ public class SafetyGame : MonoBehaviour
         _audio = go.AddComponent<AudioSource>();
         _audio.spatialBlend = 0f;
         _playerT = go.transform;
+
+        // рация: отдельный объект с фильтрами под «эфирный» звук
+        var radioGo = new GameObject("Radio");
+        radioGo.transform.SetParent(go.transform, false);
+        _radio = radioGo.AddComponent<AudioSource>();
+        _radio.spatialBlend = 0f;
+        radioGo.AddComponent<AudioHighPassFilter>().cutoffFrequency = 700f;
+        radioGo.AddComponent<AudioDistortionFilter>().distortionLevel = 0.18f;
 
         // глубина резкости из шаблонной сцены мешает — отключаем
         foreach (var vol in FindObjectsByType<UnityEngine.Rendering.Volume>(FindObjectsSortMode.None))
@@ -157,7 +168,8 @@ public class SafetyGame : MonoBehaviour
         if (!_ppe && _gateMsgT <= 0f && Mathf.Abs(P2.x) < 9f && P2.y > 42f && P2.y < 49f)
         {
             _ui.Toast("Охранник: без СИЗ на территорию не пущу! Бытовка — рядом с КПП.", Color.white);
-            _gateMsgT = 4f;
+            Say("guard");
+            _gateMsgT = 6f;
         }
     }
 
@@ -180,7 +192,10 @@ public class SafetyGame : MonoBehaviour
         {
             _leak.SinceReport += dt;
             if (_leak.SinceReport > 8f)
+            {
                 ClearLeak("Аварийная бригада устранила утечку", "#8fe28f");
+                Say("leak_fixed");
+            }
         }
         if (_leak != null && _leak.Cloud != null)
         {
@@ -209,6 +224,11 @@ public class SafetyGame : MonoBehaviour
         }
         if (g >= 40)
         {
+            if (_leak != null && !_leak.AlarmSaid)
+            {
+                _leak.AlarmSaid = true;
+                Say("gas_alarm");
+            }
             _expoT += dt;
             if (_expoT > 2.5f)
             {
@@ -263,6 +283,7 @@ public class SafetyGame : MonoBehaviour
             _ppe = true;
             _refs.GateBar.SetActive(false);
             _refs.GateBlocker.SetActive(false);
+            Say("ppe");
             Beep(1320f, 0.12f, 0.3f);
             _ui.Toast("СИЗ получены: каска, спецодежда, газоанализатор", new Color(0.72f, 0.96f, 0.72f));
             _ui.AddLog("Получены СИЗ, допуск на территорию открыт", "#8fe28f");
@@ -285,13 +306,21 @@ public class SafetyGame : MonoBehaviour
             if (Dist(_leak.Pos) < 30f)
             {
                 _leak.Reported = true;
-                Beep(1320f, 0.12f, 0.3f);
                 AddScore(150, "Своевременный доклад об утечке — выезд аварийной бригады");
                 _ui.Toast("Диспетчер: принято! Аварийная бригада выехала.", new Color(0.72f, 0.96f, 0.72f));
+                Say("leak_accepted");
             }
-            else _ui.Toast("Диспетчер: уточните место — подойдите ближе к источнику.", Color.white);
+            else
+            {
+                _ui.Toast("Диспетчер: уточните место — подойдите ближе к источнику.", Color.white);
+                Say("specify");
+            }
         }
-        else _ui.Toast("Диспетчер: обстановка штатная, продолжайте обход.", Color.white);
+        else
+        {
+            _ui.Toast("Диспетчер: обстановка штатная, продолжайте обход.", Color.white);
+            Say("all_clear");
+        }
     }
 
     void OpenQuiz(Checkpoint cp)
@@ -327,6 +356,7 @@ public class SafetyGame : MonoBehaviour
             {
                 _allDone = true;
                 body += "\n\nОбход завершён! Вернитесь на КПП и сдайте смену (E).";
+                Say("return_kpp");
             }
             _ui.ShowQuizResult(title, body, opt.Ok, ResumePlay);
         });
@@ -350,6 +380,7 @@ public class SafetyGame : MonoBehaviour
     void Violation(string why)
     {
         _violations++;
+        Say("violation");
         Beep(220f, 0.3f, 0.4f);
         _ui.Toast("НАРУШЕНИЕ: " + why, new Color(1f, 0.55f, 0.55f));
         _ui.AddLog("Нарушение: " + why, "#ff8585");
@@ -422,6 +453,7 @@ public class SafetyGame : MonoBehaviour
         int done = _checkpoints.Count(c => c.Done);
         string title, body, rank;
         Color rankColor;
+        Say(reason == "fired" ? "fired" : reason == "success" ? "shift_done" : "all_clear");
         if (reason == "fired")
         {
             title = "ОТСТРАНЕНИЕ ОТ РАБОТЫ";
@@ -464,6 +496,33 @@ public class SafetyGame : MonoBehaviour
     {
         Cursor.visible = visible;
         Cursor.lockState = visible ? CursorLockMode.None : CursorLockMode.Locked;
+    }
+
+    /// Реплика диспетчера по рации (WAV из Assets/Resources/Dispatcher).
+    void Say(string clipName)
+    {
+        if (!_voiceCache.TryGetValue(clipName, out var clip))
+        {
+            clip = Resources.Load<AudioClip>("Dispatcher/" + clipName);
+            _voiceCache[clipName] = clip;
+        }
+        if (clip == null) return;
+
+        if (_pttClick == null)
+        {
+            const int sr = 22050;
+            int n = sr / 18;
+            var data = new float[n];
+            var rnd = new System.Random(7);
+            for (int i = 0; i < n; i++)
+                data[i] = ((float)rnd.NextDouble() * 2f - 1f) * 0.35f * (1f - (float)i / n);
+            _pttClick = AudioClip.Create("ptt", n, 1, sr, false);
+            _pttClick.SetData(data, 0);
+        }
+        _radio.Stop();
+        _radio.PlayOneShot(_pttClick, 0.7f);
+        _radio.clip = clip;
+        _radio.PlayDelayed(0.15f);
     }
 
     void Beep(float freq, float dur, float vol)
